@@ -52,35 +52,62 @@ datatype UTID = Utid nat
 
 datatype CoreID = Core nat
 
+
 record CLEntry = 
-  content :: Val
+  content :: "Val option"
   block_state :: MESI_State
 
+(*
 record DevCLMap = 
   clid :: ClusterID
   coreid  :: CoreID
   bid  :: BlockID
   clentry :: CLEntry
+*)
+type_synonym ClusterMap = "CoreID \<Rightarrow> BlockID \<rightharpoonup> CLEntry"
+(*model a map entry as tuple and set restrictions in the starting state *)
+(*Why not a function with many arrows? Not possible to (easily) add restrictions on a function?*)
 
-type_synonym DevCLMap1= "ClusterID \<rightharpoonup> CoreID \<rightharpoonup> BlockID \<rightharpoonup> CLEntry "
-(*tuple*)
+type_synonym DevCLMap = "ClusterID \<Rightarrow> ClusterMap"
 
-type_synonym Cluster_State_Table = "ClusterID \<rightharpoonup> MESI_State"
+definition empty_dev_cl_map :: "DevCLMap"
+  where [simp]:
+  "empty_dev_cl_map \<equiv> \<lambda>clid. \<lambda>coreid. \<lambda>bid. None"
 
 
+
+(*Alternative of using tuples, waiting to be seen which is better*)
+type_synonym Cluster_State_Table = "ClusterID \<rightharpoonup> MESI_State "
 text \<open>the name cl_state_mapping seems quite un-friendly for first time readers\<close>
 record HostCLMap = 
-  content :: "BlockID \<Rightarrow> Val"
-  cl_state_mapping :: "BlockID \<Rightarrow> Cluster_State_Table"
+  cl_content_mapping  :: "BlockID \<Rightarrow> Val"
+  cl_state_mapping    :: "BlockID \<Rightarrow> Cluster_State_Table"
 
 definition empty_host_cl_map :: "HostCLMap"
   where [simp]:
-  "empty_host_cl_map \<equiv> \<lparr> content = \<lambda>_. 0, cl_state_mapping = \<lambda>_. (\<lambda>id. None ) \<rparr>"
+  "empty_host_cl_map \<equiv> \<lparr> cl_content_mapping = \<lambda>_. 0, cl_state_mapping = \<lambda>_. (\<lambda>id. None ) \<rparr>"
 
 
-
-value "(content empty_host_cl_map) (Block 2)"
+(*Initial state of the host cacheline: values are in their initial value, and no devices holds copies of host memory*)
+value "(cl_content_mapping empty_host_cl_map) (Block 2)"
 value "(cl_state_mapping empty_host_cl_map)  (Block 2) (Dev 2) "
+
+type_synonym DevEntryUpdate = "(BlockID \<rightharpoonup> CLEntry) \<Rightarrow> BlockID \<Rightarrow>  CLEntry \<Rightarrow> (BlockID \<rightharpoonup> CLEntry)"
+
+
+fun update_dev_with_entry :: DevEntryUpdate
+  where "update_dev_with_entry devmap bid  entry = devmap (bid := Some entry)"
+
+
+
+fun update_dev_cl_map_with_entry :: "ClusterID \<Rightarrow> CoreID \<Rightarrow> BlockID \<Rightarrow> CLEntry \<Rightarrow> DevCLMap \<Rightarrow> DevCLMap"
+  where
+"update_dev_cl_map_with_entry cl co block entry \<Delta> = \<Delta> ( cl := (\<Delta> cl) (co := ( (\<Delta> cl co ) (block := Some entry) )     ) ) "
+
+fun update_dev_cl_map_with_state :: "ClusterID \<Rightarrow> CoreID \<Rightarrow> BlockID \<Rightarrow> MESI_State \<Rightarrow> DevCLMap \<Rightarrow> DevCLMap"
+  where
+"update_dev_cl_map_with_state cl co block state \<Delta> = \<Delta> ( cl := (\<Delta> cl) (co := ( (\<Delta> cl co ) (block := Some \<lparr>CLEntry.content = None, block_state = state\<rparr>) )     ) ) "
+
 
 text \<open>update the state of block bid_i in device clid_i to mesi_i in the host cacheline mapping table\<close>
 fun update_host_cl_map_state :: "ClusterID \<Rightarrow> BlockID \<Rightarrow> MESI_State  \<Rightarrow> HostCLMap \<Rightarrow> HostCLMap"
@@ -91,7 +118,8 @@ fun update_host_cl_map_state :: "ClusterID \<Rightarrow> BlockID \<Rightarrow> M
   "
 
 
-value "let dev2shared = update_host_cl_map_state (Dev 2) (Block 2) Shared empty_host_cl_map in (cl_state_mapping dev2shared (Block 2) (Dev 2))"
+value "let dev2shared = update_host_cl_map_state (Dev 2) (Block 2) Shared empty_host_cl_map in 
+          (cl_state_mapping dev2shared (Block 2) (Dev 2))"
 
 
 
@@ -99,19 +127,33 @@ datatype Instruction =
       Write ClusterID CoreID BlockID Val RegNum
     | Read ClusterID CoreID BlockID RegNum
     | Evict ClusterID CoreID BlockID 
-(*a equence of events one cluster issues, a sequence of events another cluster issues
+(*a sequence of events one cluster issues, a sequence of events another cluster issues
 read event v.s. load
 cluster  issue messages *)
+type_synonym Program = "ClusterID \<Rightarrow> (CoreID \<Rightarrow> Instruction list)"
+
+definition empty_program :: Program where [simp]:
+"empty_program \<equiv> \<lambda>clid. \<lambda>coreid. []"
+
+fun add_i :: "Program \<Rightarrow> Instruction \<Rightarrow> ClusterID \<Rightarrow> CoreID \<Rightarrow> Program"
+  where "add_i P i clid core = P (clid := ( (P clid  ) (  core := (P clid core) @ [i])))"
+
+definition write1 :: Instruction where "write1 = (Write (Dev 1) (Core 1) (Block 1) 2 (Reg 1))"
+definition write2 :: Instruction where "write2 = (Write (Dev 2) (Core 2) (Block 1) 3 (Reg 1))"
 
 
-datatype DTHReqType = RdShared | RdOwn | RdAny | RdCurr | CleanEvict
+definition two_devices_writing_at_same_location :: Program where
+"two_devices_writing_at_same_location = add_i (add_i empty_program write1 (Dev 1) (Core 1)) write2 (Dev 2) (Core 2)"
+
+datatype DTHReqType = RdShared | RdOwn | RdOwnNoData | RdAny | RdCurr | CleanEvict | DirtyEvict | CleanEvictNoData | 
+  ItoMWrite | WrCur | CLFlush | CacheFlushed | WOWrInv | WOWrInvF | WrInv
 
 
 
 record DTHReq = 
   utid :: UTID 
   bid :: BlockID
-  dthreqop :: DTHReqType
+  dthreqtype :: DTHReqType
   clid :: ClusterID
 
 (*
@@ -128,32 +170,43 @@ type_synonym DTHReqs = "ClusterID \<Rightarrow> DTHReq list"
 type_synonym DTHReqs = "ClusterID \<rightharpoonup> DTHReq"
 *)
 
+definition empty_dthreqs :: DTHReqs where [simp]:
+"empty_dthreqs \<equiv> \<lambda>clid. []"
 
-datatype DTHRespType = RspIHitSE | RspIFwdM
 
-record DTHRespFields = 
+datatype DTHRespType = RspIHitI | RspIHitSE |RspSHitSE | RspVHitV | RspIFwdM  | RspVFwdV  | RspSFwdM
+
+record DTHResp = 
+  utid:: UTID
   bid :: BlockID
   dthresptype :: DTHRespType
   clid :: ClusterID
 
 
-(*proposal: change it to utid \<Rightarrow> other fields*)
-type_synonym DTHResp = "UTID \<rightharpoonup> DTHRespFields"
 
-record DTHDataFields =  
+record DTHData =  
+  utid:: UTID
   bid :: BlockID
   content :: Val
   clid :: ClusterID
+  bogus :: bool
 
   
-type_synonym DTHData = "UTID \<rightharpoonup> DTHDataFields"
+(*type_synonym DTHData = "UTID \<rightharpoonup> DTHDataFields" *)
 
- 
+
 
  
 type_synonym DTHResps = "ClusterID \<Rightarrow> DTHResp list"
 
+definition empty_dthresps :: DTHResps where [simp]:
+"empty_dthresps \<equiv> \<lambda>clid. []"
+
+
 type_synonym DTHDatas = "ClusterID \<Rightarrow> DTHData list"
+
+definition empty_dthdatas :: DTHDatas where [simp]:
+"empty_dthdatas \<equiv> \<lambda>clid. []"
 
 
 
@@ -162,10 +215,11 @@ datatype HTDReqType = SnpData | SnpInv | SnpCur
 record HTDReq = 
   utid :: UTID 
   bid :: BlockID
-  htdreqop :: HTDReqType
+  htdreqtype :: HTDReqType
   clid :: ClusterID
 
-datatype HTDRespType = RspIHitSE | RspIFwdM
+datatype HTDRespType = GO | GO_WritePull | GO_WritePullDrop | WritePull | 
+    GO_Err | FastGO_WritePull | GO_Err_WritePull | ExtCmp
 
 
 record HTDResp = 
@@ -173,6 +227,7 @@ record HTDResp =
   bid :: BlockID
   htdresptype :: HTDRespType
   clid :: ClusterID
+  state_granted :: MESI_State
 
 record HTDData = 
   utid :: UTID
@@ -184,27 +239,37 @@ record HTDData =
 
 type_synonym HTDReqs = "ClusterID \<Rightarrow> HTDReq list"
 
+definition empty_htdreqs :: HTDReqs where [simp]:
+"empty_htdreqs \<equiv> \<lambda>clid. []"
+
  
 type_synonym HTDResps = "ClusterID \<Rightarrow> HTDResp list"
+definition empty_htdresps :: HTDResps where [simp]:
+"empty_htdresps \<equiv> \<lambda>clid. []"
 
 type_synonym HTDDatas = "ClusterID \<Rightarrow> HTDData list"
-
+definition empty_htddatas :: HTDDatas where [simp]:
+"empty_htddatas \<equiv> \<lambda>clid. []"
 
 record DevTracker = 
+  clusterid :: ClusterID
   coreid  :: CoreID
   bid     :: BlockID
   st      :: MESI_State
   dNeeded :: bool
-  dRecvd  :: bool
+  dataCompleted  :: bool
   rRecvd  :: bool
   dthreqtype :: DTHReqType
 
 text \<open>Our model only deals with transactions initiated by a DTHRequest.\<close>
 
-type_synonym DevTrackers = "UTID \<Rightarrow> DevTracker"
-  
-  
+type_synonym DevTrackers = "UTID \<rightharpoonup> DevTracker"
+definition empty_devtrackers :: DevTrackers where [simp]:
+"empty_devtrackers \<equiv> \<lambda>utid. None"
+
+
 record HostTracker = 
+  clusterid :: ClusterID
   coreid  :: CoreID
   bid     :: BlockID
   st      :: MESI_State
@@ -216,43 +281,627 @@ record HostTracker =
 text \<open>Our model only deals with transactions initiated by a DTHRequest. Likewise trackers only
 records DTH request types.\<close>
 
-type_synonym HostTrackers = "UTID \<Rightarrow> DevTracker"
+type_synonym HostTrackers = "UTID \<rightharpoonup> HostTracker"
 
+definition empty_hosttrackers :: HostTrackers where [simp]:
+"empty_hosttrackers \<equiv> \<lambda>utid. None"
 
 
 
 
 record Type1State = 
-  hostmappings      :: HostCLMap
-  devicemappings    :: DevCLMap
+  hostclmap      :: HostCLMap
+  devclmap    :: DevCLMap
   dthreqs           :: DTHReqs
   dthresps          :: DTHResps
   dthdatas          :: DTHDatas
   htdreqs           :: HTDReqs
   htdresps          :: HTDResps
   htddatas          :: HTDDatas
-  htrackers         :: HostTrackers
-  dtrackers         :: DevTrackers
+  hosttrackers         :: HostTrackers
+  devtrackers         :: DevTrackers
   
 
 
 
 
 
-text{*for CXL*}
-inductive state_transition :: "Type1State \<Rightarrow> Type1State \<Rightarrow> bool"
-(infix "\<leadsto>ev" 30)
+text \<open> for CXL \<close>
+fun differ_one_instruction :: "Program \<Rightarrow> Program \<Rightarrow> 
+  ClusterID \<Rightarrow> CoreID \<Rightarrow> Instruction \<Rightarrow> bool"
+  where "differ_one_instruction P P' dev_i core_j i = 
+    (P = P'(dev_i := (P' dev_i) (core_j := (i # P' dev_i core_j ))))"
+
+fun host_mapping_state :: "Type1State \<Rightarrow> ClusterID \<Rightarrow>
+  BlockID \<Rightarrow> MESI_State \<Rightarrow> bool"
+  where "host_mapping_state \<Sigma> dev_i X mesi_state = 
+    ((cl_state_mapping (hostclmap \<Sigma>) ) X dev_i = Some mesi_state)"
+
+fun host_stored_val_is :: "Type1State  \<Rightarrow>
+  BlockID \<Rightarrow> Val \<Rightarrow> bool"
+  where "host_stored_val_is \<Sigma> X v = 
+    ((cl_content_mapping (hostclmap \<Sigma>) ) X  =  v)"
+
+fun dev_stored_val_is :: "Type1State \<Rightarrow> ClusterID \<Rightarrow> CoreID \<Rightarrow> BlockID \<Rightarrow> Val \<Rightarrow> bool"
+  where "dev_stored_val_is \<Sigma> devi corej X v = 
+    (\<exists>dontCareState. ((devclmap \<Sigma>) devi corej X = Some \<lparr>CLEntry.content = Some v, block_state = dontCareState \<rparr> ))"
+
+fun dequeued_dthreq :: "Type1State \<Rightarrow> Type1State \<Rightarrow> ClusterID \<Rightarrow> DTHReq \<Rightarrow> bool"
+  where "dequeued_dthreq \<Sigma> \<Sigma>' dev_i msg = 
+    (\<Sigma>' = \<Sigma> \<lparr>dthreqs := ((dthreqs \<Sigma>) (dev_i := (dthreqs \<Sigma>) dev_i  @ [msg] )) \<rparr> ) "
+
+
+(*TODO: Bogus field? Once the device has issued this command (DirtyEvict)
+and the address is subsequently snooped, but before the device 
+has received the GO-WritePull, the device must set the Bogus field in 
+all D2H Data messages to indicate that the data is now stale.
+*)
+(*
+definition State0, State1, etc.
+*)
+
+
+inductive internal_transition :: "Type1State \<Rightarrow> Type1State \<Rightarrow> bool"
+(infix "\<leadsto>env" 30)
   where
-"\<lbrakk> dthreqs \<Sigma>  dev_i = \<lparr>utid = utid1, bid = block_X, dthreqop = RdOwn, clid = dev_i\<rparr> # tail; 
-   dthreqs \<Sigma>' dev_i = tail \<rbrakk> \<Longrightarrow> 
+RdOwn_requesting: "\<lbrakk>  
+    dthreqs \<Sigma>  dev_i = \<lparr>DTHReq.utid = utid1, bid = block_X, dthreqtype = RdOwn, clid = dev_i\<rparr> # tail ;
+    dthreqs \<Sigma>'  dev_i = tail; 
+    
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+
+    \<forall> dev_ip \<in> Sharers. 
+      (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_ip = Some Shared;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - Sharers). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+    (hosttrackers \<Sigma>) utid1 = None;
+
+    dthreqs \<Sigma>' dev_i = tail;
+    (hosttrackers \<Sigma>') utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    \<forall> dev_ip \<in> Sharers. (htdreqs \<Sigma>') dev_ip = ((htdreqs \<Sigma>) dev_ip) @ [\<lparr>HTDReq.utid = utid1, bid = block_X, 
+      htdreqtype = SnpInv, clid = dev_ip \<rparr>];
+    (htddatas \<Sigma>') dev_i = (htddatas \<Sigma>') dev_i @ [\<lparr>HTDData.utid = utid1, bid = block_X, content = v, clid = dev_i \<rparr>]
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| RdOwn_requesting_owned: "\<lbrakk>  
+    dthreqs \<Sigma>  dev_i = \<lparr>DTHReq.utid = utid1, bid = block_X, dthreqtype = RdOwn, clid = dev_i\<rparr> # tail ; 
+    dthreqs \<Sigma>' dev_i = tail;
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+
+
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_owner = Some Exclusive;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - {dev_owner}). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+    (hosttrackers \<Sigma>) utid1 = None;
+
+
+    (hosttrackers \<Sigma>') utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (htdreqs \<Sigma>') dev_owner =  ((htdreqs \<Sigma>) dev_owner) @ [\<lparr>HTDReq.utid = utid1, bid = block_X, 
+      htdreqtype = SnpInv, clid = dev_owner \<rparr>]
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+|
+RdOwn_DTHResp_shared: "\<lbrakk>  
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+    dev_ip \<in> Sharers;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_ip = Some Shared;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - Sharers). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (htdreqs \<Sigma>) dev_ip =  \<lparr>HTDReq.utid = utid1, bid = block_X, 
+      htdreqtype = SnpInv, clid = dev_ip \<rparr> # tailh;
+    (htdreqs \<Sigma>') dev_ip = tailh;
+
+    (dthresps \<Sigma>) dev_ip = inith;
+    (dthresps \<Sigma>') dev_ip = inith @ [\<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIHitSE, clid = dev_ip\<rparr>]
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+|
+RdOwn_DTHResp_owned_Exclusive: "\<lbrakk>  
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_owner = Some Exclusive;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - {dev_owner}). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+
+    (devclmap \<Sigma>) dev_owner core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Exclusive \<rparr>;
+    (devclmap \<Sigma>') dev_owner core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (htdreqs \<Sigma>) dev_owner =  \<lparr>HTDReq.utid = utid1, bid = block_X, 
+      htdreqtype = SnpInv, clid = dev_ip \<rparr> # tailh;
+    (htdreqs \<Sigma>') dev_owner = tailh;
+
+    (dthresps \<Sigma>) dev_owner = inith;
+    (dthresps \<Sigma>') dev_owner = inith @ [\<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIHitSE, clid = dev_ip\<rparr>]
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+|
+RdOwn_DTHResp_owned_Modified: "\<lbrakk>  
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_owner = Some Exclusive \<or> 
+      (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_owner = Some Modified;
+
+
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - {dev_owner}). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+    
+    (devclmap \<Sigma>) dev_owner core_j X = Some \<lparr>CLEntry.content = Some v', block_state = Modified \<rparr>;
+    (devclmap \<Sigma>') dev_owner core_j X = Some \<lparr>CLEntry.content = Some v', block_state = Invalid \<rparr>;
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (htdreqs \<Sigma>) dev_owner =  \<lparr>HTDReq.utid = utid1, bid = block_X, 
+      htdreqtype = SnpInv, clid = dev_ip \<rparr> # tailh;
+    (htdreqs \<Sigma>') dev_owner = tailh;
+
+    (dthresps \<Sigma>) dev_owner = inith;
+    (dthresps \<Sigma>') dev_owner = inith @ [\<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIFwdM, clid = dev_ip\<rparr>];
+
+    (dthdatas \<Sigma>) dev_owner = initd;
+    (dthdatas \<Sigma>') dev_owner = initd @ [\<lparr>DTHData.utid = utid1, bid = block_X, content = v', clid = dev_owner, bogus = False \<rparr>]
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| RdOwn_HTDResp_owned_Exclusive: "\<lbrakk>  
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_owner = Some Exclusive;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) 
+        block_X dev_owner = Some Invalid;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_i = Some Invalid;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) 
+        block_X dev_i = Some Exclusive \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) 
+        block_X dev_i = Some Modified;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - {dev_owner}). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = dSentbool, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (hosttrackers \<Sigma>') utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = dSentbool, rSent = True, dthreqtype = RdOwn  \<rparr>;
+
+
+    (dthresps \<Sigma>) dev_owner =  \<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIHitSE, clid = dev_owner\<rparr> # tailDTHResp \<or>
+      (dthresps \<Sigma>) dev_owner =  \<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIHitI, clid = dev_owner\<rparr> # tailDTHResp;
+    (dthresps \<Sigma>') dev_owner = tailDTHResp;
+    (htdresps \<Sigma>) dev_i = p_init;
+    (htdresps \<Sigma>') dev_i = p_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Exclusive \<rparr>]
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| HTDResp_owned_Modified: "\<lbrakk>  
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = dataCompletedbool, rRecvd = False, dthreqtype = dthrequired \<rparr>;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_owner = Some Exclusive \<or>     
+      (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_owner = Some Modified;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) block_X dev_owner = Some Invalid;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_i = Some Invalid;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Exclusive;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - {dev_owner}). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = dSentbool, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (hosttrackers \<Sigma>') utid1 = (if(dSentbool) then None else Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = True, dthreqtype = RdOwn  \<rparr>);
+
+    (dthresps \<Sigma>) dev_owner =  \<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIFwdM, clid = dev_owner\<rparr> # tailDTHResp;
+    (dthresps \<Sigma>') dev_owner = tailDTHResp;
+    (htdresps \<Sigma>) dev_i = p_init;
+    (htdresps \<Sigma>') dev_i = (if(dthrequired = RdOwn) then p_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Exclusive \<rparr>]
+                            else if (dthrequired = RdShared) then p_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Shared \<rparr>]
+                            else if (dthrequired = RdCurr) then   p_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Invalid \<rparr>]
+                            else if (dthrequired = RdAny)  then   p_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Exclusive \<rparr>]
+                            else p_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Exclusive \<rparr>])
+
+
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| HTDData_sending: "
+\<lbrakk>    (dthdatas \<Sigma>) dev_owner = \<lparr>DTHData.utid = utid1, bid = block_X, content = v', clid = dev_owner, bogus = False\<rparr> # tailDTHData;
+    (dthdatas \<Sigma>') dev_owner = tailDTHData;
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = rSentbool, dthreqtype = dthreq1  \<rparr>;
+    (hosttrackers \<Sigma>') utid1 = (if (\<not>rSentbool) then Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Exclusive,
+      dNeeded = True, dSent = True, rSent = rSentbool, dthreqtype = dthreq1  \<rparr> else None );
+    
+    (cl_content_mapping (hostclmap \<Sigma>')) block_X = v';
+
+    (htddatas \<Sigma>) dev_i = init_HTDData;
+    (htddatas \<Sigma>') dev_i = init_HTDData @ [\<lparr>HTDData.utid = utid1, bid = block_X, content = v', clid = dev_i\<rparr>]\<rbrakk> \<Longrightarrow> \<Sigma> \<leadsto>env \<Sigma>'
+"
+| RdOwn_HTDResp_Shared: "\<lbrakk>  
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = dCompletedBool, rRecvd = False, dthreqtype = RdOwn \<rparr>;
+    
+
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_is = Some Shared \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_is = Some Invalid;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) 
+        block_X dev_is = Some Invalid;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_i = Some Invalid \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_i = None;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Exclusive;
+    \<forall> dev_iq \<in> ((UNIV::ClusterID set) - Sharers). 
+       (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = None \<or> (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) block_X dev_iq = Some Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v;
+
+
+    (hosttrackers \<Sigma>) utid1 = Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = dNeededbool, dSent = dSentbool, rSent = False, dthreqtype = RdOwn  \<rparr>;
+    (hosttrackers \<Sigma>') utid1 = (if (dSentbool \<or> \<not>dNeededbool) then None else Some \<lparr>HostTracker.clusterid = dev_i, coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = dNeededbool, dSent = dSentbool, rSent = True, dthreqtype = RdOwn  \<rparr>);
+
+    (dthresps \<Sigma>) dev_is =  \<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIHitSE, clid = dev_is\<rparr> # tailDTHResp \<or>
+      (dthresps \<Sigma>) dev_is =  \<lparr>DTHResp.utid = utid1, bid = block_X, dthresptype = RspIHitI, clid = dev_is\<rparr> # tailDTHResp;
+    (dthresps \<Sigma>') dev_is = tailDTHResp;
+    (htdresps \<Sigma>) dev_i = i_init;
+    (htdresps \<Sigma>') dev_i = i_init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = Exclusive \<rparr>];
+    (if (dNeededbool \<and> \<not>dSentbool) then (htddatas \<Sigma>') dev_i = 
+                                        ((htddatas \<Sigma>) dev_i) @ [\<lparr>HTDData.utid = utid1, bid = block_X, content = v, clid = dev_i\<rparr>] else True)
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+
+| finish_GO: "\<lbrakk>  
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = _,
+    dNeeded = True, dataCompleted = dataCompletedBool, rRecvd = False, dthreqtype = dthreq \<rparr>;
+    devtrackers \<Sigma>' utid1 = (if(dataCompletedBool) then None else Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = _,
+    dNeeded = True, dataCompleted = dataCompletedBool, rRecvd = True, dthreqtype = dthreq \<rparr>);
+
+    (htdresps \<Sigma>) dev_i = \<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO, clid = dev_i, state_granted = S \<rparr> # itail;
+    (htdresps \<Sigma>') dev_i = i_tail;
+
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_i = Some S;
+
+
+    (devclmap \<Sigma>) dev_i core_j block_X = _;
+    (devclmap \<Sigma>') dev_i core_j block_X = Some \<lparr>CLEntry.content = Some 0, block_state = S\<rparr>
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+
+| finish_Data: "\<lbrakk>  
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = _,
+    dNeeded = True, dataCompleted = False, rRecvd = rRecvdBool, dthreqtype = dthreq \<rparr>;
+    devtrackers \<Sigma>' utid1 = (if(rRecvdBool) then None else Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = _,
+    dNeeded = True, dataCompleted = True, rRecvd = rRecvdBool, dthreqtype = dthreq \<rparr>);
+
+    (htddatas \<Sigma>) dev_i = \<lparr>HTDData.utid = utid1, bid = block_X, content = v', clid = dev_i \<rparr> # itail;
+    (htddatas \<Sigma>') dev_i = i_tail;
+
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = _, block_state = S\<rparr>;
+    (devclmap \<Sigma>') dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v', block_state = S\<rparr>
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+
+| DirtyEvict_responding: "\<lbrakk>  
+    dthreqs \<Sigma>  dev_i = \<lparr>DTHReq.utid = utid1, bid = block_X, dthreqtype = DirtyEvict, clid = dev_i\<rparr> # tail ; 
+    dthreqs \<Sigma>' dev_i = tail;
+
+    htdresps \<Sigma>  dev_i = init;
+    htdresps \<Sigma>' dev_i =  init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO_WritePull, clid = dev_i, state_granted = Invalid \<rparr>];
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Modified,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = DirtyEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = DirtyEvict \<rparr>;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_i = Some Modified;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) 
+        block_X dev_i = Some Invalid;
+    (hosttrackers \<Sigma>) utid1 = None;
+
+    
+    (hosttrackers \<Sigma>') utid1 = Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = True, dthreqtype = DirtyEvict  \<rparr>
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| DirtyEvict_data_sending: " \<lbrakk>
+    (hosttrackers \<Sigma>) utid1 =  Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = DirtyEvict  \<rparr>;
+     htdresps \<Sigma> dev_i = \<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO_WritePull, clid = dev_i, state_granted = _ \<rparr> # tail;
+     htdresps \<Sigma>' dev_i = tail;
+
+    devtrackers \<Sigma> utid1 = Some \<lparr> DevTracker.clusterid = dev_i, DevTracker.coreid = core_j, DevTracker.bid = block_X, st = Invalid, 
+      dNeeded = True, dataCompleted = _, rRecvd = _, dthreqtype = DirtyEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = Some \<lparr>DevTracker.clusterid = dev_i,  DevTracker.coreid = core_j, DevTracker.bid = block_X, st = Invalid, 
+      dNeeded = True, dataCompleted = True, rRecvd = True, dthreqtype = DirtyEvict \<rparr>;
+
+    (dthdatas \<Sigma>)  dev_i = init;
+    (dthdatas \<Sigma>') dev_i = init @ [ \<lparr>DTHData.utid = utid1, bid = block_X, content = v, clid = dev_i, bogus = False \<rparr>];
+
+    (devclmap \<Sigma>) dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>') dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+
+    (cl_state_mapping (hostclmap \<Sigma>)) block_X dev_i = Some Invalid;
+    (cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Invalid
+      
+    \<rbrakk> \<Longrightarrow> \<Sigma> \<leadsto>env \<Sigma>'"
+| DirtyEvict_finish: "\<lbrakk>
+    (hosttrackers \<Sigma>) utid1 =  Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = True, dthreqtype = DirtyEvict  \<rparr>;
+    (hosttrackers \<Sigma>') utid1 = None;
+
+    devtrackers \<Sigma> utid1 = Some \<lparr> DevTracker.clusterid = dev_i, DevTracker.coreid = core_j, DevTracker.bid = block_X, st = Invalid, 
+      dNeeded = True, dataCompleted = False, rRecvd = True, dthreqtype = DirtyEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = None;
+
+    (dthdatas \<Sigma>)  dev_i =   \<lparr>DTHData.utid = utid1, bid = block_X, content = v, clid = dev_i, bogus = False \<rparr> # dtail;
+    (dthdatas \<Sigma>') dev_i = dtail;
+
+    (devclmap \<Sigma>) dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>') dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X  = v;
+    (cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Invalid
+      
+    \<rbrakk> \<Longrightarrow> \<Sigma> \<leadsto>env \<Sigma>'"
+| CleanEvict_responding_requires_data: "\<lbrakk>  
+    dthreqs \<Sigma>  dev_i = \<lparr>DTHReq.utid = utid1, bid = block_X, 
+      dthreqtype = CleanEvict, clid = dev_i\<rparr> # tail ; 
+    dthreqs \<Sigma>' dev_i = tail;
+
+    htdresps \<Sigma>  dev_i = init;
+    htdresps \<Sigma>' dev_i =  init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO_WritePull, clid = dev_i, state_granted = Invalid \<rparr>];
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Exclusive,
+    dNeeded = False, dataCompleted = False, rRecvd = False, dthreqtype = CleanEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = CleanEvict \<rparr>;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_i = Some Modified;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>')) 
+        block_X dev_i = Some Invalid;
+    (hosttrackers \<Sigma>) utid1 = None;
+
+    
+    (hosttrackers \<Sigma>') utid1 = Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = True, dthreqtype = CleanEvict  \<rparr>
+
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| CleanEvict_responding_nodata: "\<lbrakk>  
+    dthreqs \<Sigma>  dev_i = \<lparr>DTHReq.utid = utid1, bid = block_X, 
+      dthreqtype = CleanEvict, clid = dev_i\<rparr> # tail ; 
+    dthreqs \<Sigma>' dev_i = tail;
+
+    htdresps \<Sigma>  dev_i = init;
+    htdresps \<Sigma>' dev_i =  init @ [\<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO_WritePullDrop, clid = dev_i, state_granted = Invalid \<rparr>];
+
+    devtrackers \<Sigma> utid1 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Exclusive,
+    dNeeded = False, dataCompleted = False, rRecvd = False, dthreqtype = CleanEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = devtrackers \<Sigma> utid1;
+    (HostCLMap.cl_state_mapping (hostclmap \<Sigma>)) 
+        block_X dev_i = Some Invalid;
+    (hosttrackers \<Sigma>) utid1 = None;
+
+    
+    (hosttrackers \<Sigma>') utid1 = Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = False, dSent = False, rSent = True, dthreqtype = CleanEvict  \<rparr>
+
+\<rbrakk> \<Longrightarrow> 
+  \<Sigma> \<leadsto>env \<Sigma>'"
+| CleanEvict_DTHData: " \<lbrakk>
+    (hosttrackers \<Sigma>) utid1 =  Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = False, dthreqtype = CleanEvict  \<rparr>;
+     htdresps \<Sigma> dev_i = \<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO_WritePull, clid = dev_i, state_granted = _ \<rparr> # tail;
+     htdresps \<Sigma>' dev_i = tail;
+
+    devtrackers \<Sigma> utid1 = Some \<lparr> DevTracker.clusterid = dev_i, DevTracker.coreid = core_j, DevTracker.bid = block_X, st = Invalid, 
+      dNeeded = _, dataCompleted = False, rRecvd = False, dthreqtype = CleanEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = None;
+
+    (dthdatas \<Sigma>)  dev_i = init;
+    (dthdatas \<Sigma>') dev_i = init @ [ \<lparr>DTHData.utid = utid1, bid = block_X, content = v, clid = dev_i, bogus = False \<rparr>];
+
+    (devclmap \<Sigma>) dev_i  core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>') dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+
+    (cl_state_mapping (hostclmap \<Sigma>)) block_X dev_i = Some Invalid;
+    (cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Invalid
+      
+    \<rbrakk> \<Longrightarrow> \<Sigma> \<leadsto>env \<Sigma>'"
+| CleanEvict_nodata_finish: " \<lbrakk>
+    (hosttrackers \<Sigma>) utid1 =  None;
+    (hosttrackers \<Sigma>') utid1 =  None;
+     htdresps \<Sigma> dev_i = \<lparr>HTDResp.utid = utid1, bid = block_X, htdresptype = GO_WritePullDrop, clid = dev_i, state_granted = _\<rparr> # tail;
+     htdresps \<Sigma>' dev_i = tail;
+
+    devtrackers \<Sigma> utid1 = Some \<lparr> DevTracker.clusterid = dev_i, DevTracker.coreid = core_j, DevTracker.bid = block_X, st = Invalid, 
+      dNeeded = False, dataCompleted = False, rRecvd = rRecvdBool, dthreqtype = CleanEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = None;
+
+    (dthdatas \<Sigma>)  dev_i = (dthdatas \<Sigma>') dev_i;
+
+    (devclmap \<Sigma>) dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>') dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+
+    (cl_state_mapping (hostclmap \<Sigma>)) block_X dev_i = Some Invalid;
+    (cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Invalid
+      
+    \<rbrakk> \<Longrightarrow> \<Sigma> \<leadsto>env \<Sigma>'"
+| CleanEvict_finish_data: "\<lbrakk>
+    (hosttrackers \<Sigma>) utid1 =  Some \<lparr>HostTracker.clusterid = dev_i, HostTracker.coreid = core_j, HostTracker.bid = block_X, st = Invalid,
+      dNeeded = True, dSent = False, rSent = rSentBool, dthreqtype = CleanEvict  \<rparr>;
+    (hosttrackers \<Sigma>') utid1 = None;
+
+    devtrackers \<Sigma> utid1 = Some \<lparr> DevTracker.clusterid = dev_i, DevTracker.coreid = core_j, DevTracker.bid = block_X, st = Invalid, 
+      dNeeded = True, dataCompleted = False, rRecvd = True, dthreqtype = CleanEvict \<rparr>;
+    devtrackers \<Sigma>' utid1 = None;
+
+    (dthdatas \<Sigma>)  dev_i =   \<lparr>DTHData.utid = utid1, bid = block_X, content = v, clid = dev_i, bogus = False \<rparr> # dtail;
+    (dthdatas \<Sigma>') dev_i = dtail;
+
+    (devclmap \<Sigma>) dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>') dev_i core_j X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X  = v;
+    (cl_state_mapping (hostclmap \<Sigma>')) block_X dev_i = Some Invalid
+      
+    \<rbrakk> \<Longrightarrow> \<Sigma> \<leadsto>env \<Sigma>'"
+
+   
+
+
+
+(*Still psuedo-code, should express \<Sigma> and \<Sigma>' only differ in those
+places, rather than "they are different in these places, can be arbitrary
+in other places we didn't mention. Need to use \<Sigma>[ i := X] type of syntax"*)
+inductive external_trans :: "(Type1State * Program * nat * Instruction option * UTID) \<Rightarrow> (Type1State * Program * nat * Instruction option * UTID) \<Rightarrow> bool"
+(infixr "\<leadsto>ext" 30)
+where
+RdOwn_start: 
+" \<lbrakk>  
+    differ_one_instruction P P' dev_i core_j (Write dev_i core_j block_X v reg) ;
+
+    host_mapping_state \<Sigma> dev_i block_X Invalid;
+
+    utid2 = Utid UCounter;
+    dequeued_dthreq \<Sigma> \<Sigma>' dev_i \<lparr>DTHReq.utid = utid2, bid = block_X, dthreqtype = RdOwn, clid = dev_i \<rparr>;
+
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v, block_state = Invalid \<rparr>;
+    (devclmap \<Sigma>) = (devclmap \<Sigma>');
+
+    devtrackers \<Sigma>  utid2 = None;
+    devtrackers \<Sigma>' utid2 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Invalid,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = RdOwn \<rparr>
   
     
-  \<Sigma> \<leadsto>ev \<Sigma>'"
+\<rbrakk>
+\<Longrightarrow>
+(\<Sigma>, P, UCounter, None, _) \<leadsto>ext (\<Sigma>', P', UCounter + 1, Some (Write dev_i core_j block_X v reg), utid2 )"
+|
+RdOwn_finish: 
+" \<lbrakk>  
 
+    host_mapping_state \<Sigma> dev_i block_X Exclusive;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v';
 
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v', block_state = Exclusive \<rparr>;
+    (devclmap \<Sigma>') dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v'', block_state = Modified \<rparr>;
 
+    (hosttrackers \<Sigma>) utid2 = None;
+    
+    (devtrackers \<Sigma>) utid2 = None
+    
+\<rbrakk>
+\<Longrightarrow>
+(\<Sigma>, P, UCounter,  Some (Write dev_i core_j block_X v'' reg), utid2) \<leadsto>ext (\<Sigma>', P', UCounter, None, _ )"
+|
+DirtyEvict_start: 
+" \<lbrakk>  
+    differ_one_instruction P P' dev_i core_j (Evict dev_i core_j block_X ) ;
 
+    host_mapping_state \<Sigma> dev_i block_X Modified;
 
+    utid2 = Utid UCounter;
+    dequeued_dthreq \<Sigma> \<Sigma>' dev_i \<lparr>DTHReq.utid = utid2, bid = block_X, dthreqtype = DirtyEvict, clid = dev_i \<rparr>;
+
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>) = (devclmap \<Sigma>');
+
+    (devtrackers \<Sigma>)  utid2 = None;
+    (devtrackers \<Sigma>') utid2 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Modified,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = DirtyEvict \<rparr>
+    
+\<rbrakk>
+\<Longrightarrow>
+(\<Sigma>, P, UCounter, None, _) \<leadsto>ext (\<Sigma>', P', UCounter + 1, Some (Evict dev_i core_j block_X ), utid2)"
+|DirtyEvict_start': 
+" \<lbrakk>  
+    P = P' ;
+
+    host_mapping_state \<Sigma> dev_i block_X Modified;
+
+    utid2 = Utid UCounter;
+    dequeued_dthreq \<Sigma> \<Sigma>' dev_i \<lparr>DTHReq.utid = utid2, bid = block_X, dthreqtype = DirtyEvict, clid = dev_i \<rparr>;
+
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v, block_state = Modified \<rparr>;
+    (devclmap \<Sigma>) = (devclmap \<Sigma>');
+
+    (devtrackers \<Sigma>)  utid2 = None;
+    (devtrackers \<Sigma>') utid2 = Some \<lparr>DevTracker.clusterid = dev_i, coreid = core_j, DevTracker.bid  = block_X, st = Modified,
+    dNeeded = True, dataCompleted = False, rRecvd = False, dthreqtype = DirtyEvict \<rparr>
+    
+\<rbrakk>
+\<Longrightarrow>
+(\<Sigma>, P, UCounter, None, _) \<leadsto>ext (\<Sigma>', P', UCounter + 1, None, utid2)"
+|
+DirtyEvict_finish:
+" \<lbrakk>  
+
+    host_mapping_state \<Sigma> dev_i block_X Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v';
+
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v', block_state = Invalid \<rparr> \<or>
+      (devclmap \<Sigma>) dev_i core_j block_X = None;
+    (devclmap \<Sigma>') dev_i core_j block_X = (devclmap \<Sigma>) dev_i core_j block_X;
+
+    (hosttrackers \<Sigma>) utid2 = None;
+    (devtrackers \<Sigma>) utid2 = None
+    
+\<rbrakk>
+\<Longrightarrow>
+(\<Sigma>, P, UCounter, Some (Evict dev_i core_j block_X ), utid2) \<leadsto>ext (\<Sigma>', P', UCounter, None, _)"
+|
+DirtyEvict_finish':
+" \<lbrakk>  
+
+    host_mapping_state \<Sigma> dev_i block_X Invalid;
+    (cl_content_mapping (hostclmap \<Sigma>)) block_X = v';
+
+    (devclmap \<Sigma>) dev_i core_j block_X = Some \<lparr>CLEntry.content = Some v', block_state = Invalid \<rparr> \<or>
+      (devclmap \<Sigma>) dev_i core_j block_X = None;
+    (devclmap \<Sigma>') dev_i core_j block_X = (devclmap \<Sigma>) dev_i core_j block_X;
+
+    (hosttrackers \<Sigma>) utid2 = None;
+    (devtrackers \<Sigma>) utid2 = None
+    
+\<rbrakk>
+\<Longrightarrow>
+(\<Sigma>, P, UCounter, None, utid2) \<leadsto>ext (\<Sigma>', P', UCounter, None, _)"
+|
+CleanEvictStart: "
+(\<Sigma>, P) \<leadsto>ext (\<Sigma>', P')"
 (*
 
 inductive env_trans :: "(eid \<times> eid list) sy_state \<Rightarrow> 
@@ -282,201 +931,43 @@ where [simp]:
   "empty_cache \<equiv> \<lparr> Fifo = [], Store = (\<lambda>_. None) \<rparr>" 
 
 *)
-
-
-
-
-
-
-
-
-
-
-
-text {* Scope annotations *}
-datatype scope =
-  S_wi  (* Work item scope *)
-(* | S_sg  {* Sub-group scope *} *)
-| S_wg  (* Work-group scope *)
-| S_dv  (* Device scope *)
-| S_sy  (* System scope *)
-
-text {* A thread is a list of instructions. *}
-type_synonym 'ins thread = "'ins list"
-
-text {* A workgroup is a list of threads. *}
-type_synonym 'ins workgroup = "'ins thread list"
-
-text {* An NDrange is a list of workgroups. *}
-type_synonym 'ins ndrange = "'ins workgroup list"
-
-text {* A program is a list of NDranges *}
-type_synonym 'ins program = "'ins ndrange list"
-
-datatype eid = E nat | InitE addr  (* identifies an event *) 
-datatype dvid = Dv nat  (* identifies device *)
-datatype cuid = Cu nat  (* identifies compute unit within device *)
-datatype peid = Pe nat  (* identifies processing element within compute unit *)
-
-fun nat_of_dvid where "nat_of_dvid (Dv i) = i"
-fun nat_of_cuid where "nat_of_cuid (Cu i) = i"
-fun nat_of_peid where "nat_of_peid (Pe i) = i"
-
-(*
-declare [[coercion nat_of_eid]]
-declare [[coercion nat_of_dvid]]
-declare [[coercion nat_of_cuid]]
-declare [[coercion nat_of_peid]]
-*)
-
-text {* Labels on observable memory events *}
-
-datatype write_type = Init | Noninit
-
-datatype ('extra_info, 'tau_evt) lbl = 
-  R addr val 'extra_info  (* read memory address at specific value *)
-| W write_type addr val 'extra_info  (* write memory address with specific value *)
-| RMW addr val val 'extra_info  (* rmw on memory address *) 
-| Tau 'tau_evt
-
-fun is_Tau :: "(_,_) lbl \<Rightarrow> bool"
+inductive e_transition ::  "(Type1State * Program * nat * Instruction option * UTID) \<Rightarrow> (Type1State * Program * nat * Instruction option * UTID) \<Rightarrow> bool"
+(infixr "\<leadsto>e" 30)
 where
-  "is_Tau (Tau _) = True"
-| "is_Tau _ = False"
+  one_step_trans1 : "\<lbrakk> \<Sigma> \<leadsto>env \<Sigma>' \<rbrakk> \<Longrightarrow> (\<Sigma>, P, n, i, u) \<leadsto>e (\<Sigma>', P, n, i, u)"
+| one_step_trans2 : "\<lbrakk> (\<Sigma>, P, n, i, u) \<leadsto>ext (\<Sigma>', P', n', i', u') \<rbrakk> \<Longrightarrow> (\<Sigma>, P, n, i, u) \<leadsto>e (\<Sigma>', P', n', i', u') "
 
-type_synonym basic_lbl = "(unit, unit) lbl"
-
-fun erase_evt :: "(_, _) lbl \<Rightarrow> basic_lbl"
+inductive e_transition_star :: "(Type1State * Program * nat * Instruction option * UTID) \<Rightarrow> (Type1State * Program * nat * Instruction option * UTID) \<Rightarrow> bool"
+(infixr "\<leadsto>e*" 30)
 where
-  "erase_evt (R x v _) = R x v ()"
-| "erase_evt (W wt x v _) = W wt x v ()"
-| "erase_evt (RMW x v v' _) = RMW x v v' ()"
-| "erase_evt (Tau _) = Tau ()"
+  one_step_trans : "\<lbrakk>(\<Sigma>, P, n, i, u) \<leadsto>e (\<Sigma>', P', n', i', u') \<rbrakk> \<Longrightarrow> (\<Sigma>, P, n, i, u) \<leadsto>e* (\<Sigma>', P', n', i', u')"
+| e_star : "\<lbrakk> (\<Sigma>, P, n, i, u) \<leadsto>e (\<Sigma>', P', n', i', u'); (\<Sigma>', P', n', i', u') \<leadsto>e* (\<Sigma>'', P'', n'', i'', u'') \<rbrakk> \<Longrightarrow> 
+            (\<Sigma>, P, n, i, u) \<leadsto>e* (\<Sigma>'', P'', n'', i'', u'')"
 
-record 'lbl pre_exn =
-  events :: "eid set"
-  lbl :: "eid \<Rightarrow> 'lbl"  (* label on event *)
-  dvid :: "eid \<Rightarrow> dvid"  (* device responsible for event *)
-  cuid :: "eid \<Rightarrow> cuid"  (* compute unit responsible for event *)
-  peid :: "eid \<Rightarrow> peid"  (* processing element responsible for event *)
-  sb :: "eid relation"  (* program order *)
-  
-fun erase_pre_exn :: "(_, _) lbl pre_exn \<Rightarrow> basic_lbl pre_exn"
-where
-  "erase_pre_exn X = \<lparr> 
-    events = {e \<in> events X. \<not> is_Tau (lbl X e) },
-    lbl = erase_evt \<circ> lbl X, 
-    dvid = dvid X, 
-    cuid = cuid X, 
-    peid = peid X, 
-    sb = {(e1,e2) \<in> sb X. \<not> is_Tau (lbl X e1) \<and> \<not> is_Tau (lbl X e2)} \<rparr>"
-  
-fun isomorphic_under :: "(eid \<Rightarrow> eid) \<Rightarrow> basic_lbl pre_exn \<Rightarrow> 
-  basic_lbl pre_exn \<Rightarrow> bool" 
-where
-  "isomorphic_under \<pi> X Y = 
-  (events Y = \<pi> ` events X \<and> 
-  lbl X \<langle>=, events X\<rangle> lbl Y \<circ> \<pi> \<and> 
-  dvid X \<langle>=, events X\<rangle> dvid Y \<circ> \<pi> \<and>
-  cuid X \<langle>=, events X\<rangle> cuid Y \<circ> \<pi> \<and> 
-  peid X \<langle>=, events X\<rangle> peid Y \<circ> \<pi> \<and> 
-  sb Y = map_prod \<pi> \<pi> ` sb X)"
-  
-fun isomorphic :: "basic_lbl pre_exn \<Rightarrow> basic_lbl pre_exn \<Rightarrow> bool" 
-  (infix "\<simeq>" 50)
-where
-  "X \<simeq> Y = (\<exists>\<pi>. inj_on \<pi> (events X) \<and> isomorphic_under \<pi> X Y)"
+
+
+definition start_configuration :: "Type1State"
+  where " start_configuration = \<lparr>hostclmap = empty_host_cl_map,
+                                 devclmap = empty_dev_cl_map, 
+  dthreqs           = empty_dthreqs,
+  dthresps          = empty_dthresps,
+  dthdatas          = empty_dthdatas,
+  htdreqs           = empty_htdreqs,
+  htdresps          = empty_htdresps,
+  htddatas          = empty_htddatas,
+  hosttrackers      = empty_hosttrackers,
+  devtrackers       = empty_devtrackers
+   \<rparr>"
+
+lemma "( (start_configuration, two_devices_writing_at_same_location, 0, None, Utid 999) \<leadsto>e* (\<Sigma>', P', n', i', u) \<Longrightarrow>
+\<nexists>dev1 dev2. dev1 \<noteq> dev2 \<and>     host_mapping_state \<Sigma>' dev_1 (Block 1) Exclusive \<and>     host_mapping_state \<Sigma>' dev_2 (Block 1) Exclusive)"
+  sorry
+
+
+(*invariant storng to ensure the property*)
 
 
 
 
-lemma 
-  "\<lparr> events = {E 0, E 1, E 2}, 
-     lbl = {E 0 \<mapsto> l1, E 1 \<mapsto> l2, E 2 \<mapsto> l3},
-     dvid = {E 0 \<mapsto> Dv 0, E 1 \<mapsto> Dv 0, E 2 \<mapsto> Dv 1}, 
-     cuid = {E 0 \<mapsto> Cu 0, E 1 \<mapsto> Cu 1, E 2 \<mapsto> Cu 0},
-     peid = {E 0 \<mapsto> Pe 1, E 1 \<mapsto> Pe 2, E 2 \<mapsto> Pe 4}, 
-     sb = {(E 0, E 1), (E 0, E 2), (E 1, E 2)} \<rparr> \<simeq> 
-  \<lparr> events = {E 7, E 8, E 9}, 
-    lbl = {E 7 \<mapsto> l1, E 8 \<mapsto> l2, E 9 \<mapsto> l3},
-    dvid = {E 7 \<mapsto> Dv 0, E 8 \<mapsto> Dv 0, E 9 \<mapsto> Dv 1}, 
-    cuid = {E 7 \<mapsto> Cu 0, E 8 \<mapsto> Cu 1, E 9 \<mapsto> Cu 0},
-    peid = {E 7 \<mapsto> Pe 1, E 8 \<mapsto> Pe 2, E 9 \<mapsto> Pe 4}, 
-    sb = {(E 7, E 8), (E 7, E 9), (E 8, E 9)} \<rparr>"
-
-apply simp
-apply (rule_tac x="{E 0 \<mapsto> E 7, E 1 \<mapsto> E 8, E 2 \<mapsto> E 9}" in exI)
-apply simp
-done
-
-fun add_init_events :: "'extra_info \<Rightarrow> 
-  ('extra_info, 'tau_evt) lbl pre_exn \<Rightarrow> ('extra_info, 'tau_evt) lbl pre_exn"
-where
-  "add_init_events extra_info X = X \<lparr> 
-    events := events X \<union> {InitE x | x. True},
-    lbl := (\<lambda>e. case e of E e \<Rightarrow> lbl X (E e) | InitE x \<Rightarrow> W Init x 0 extra_info)
-  \<rparr>"
-
-definition nil_pre_exn :: "'lbl pre_exn"
-where [simp]:
-  "nil_pre_exn = \<lparr> events = {}, lbl = undefined, dvid = undefined, 
-  cuid = undefined, peid = undefined, sb = {} \<rparr>"
-
-fun sing_pre_exn :: "eid \<Rightarrow> 'lbl \<Rightarrow> dvid \<Rightarrow> cuid \<Rightarrow> peid \<Rightarrow> 'lbl pre_exn"
-where
-  "sing_pre_exn e a dv cu pe = \<lparr> events = {e}, lbl = {e \<mapsto> a}, 
-  dvid = {e \<mapsto> dv}, cuid = {e \<mapsto> cu}, peid = {e \<mapsto> pe}, sb = {} \<rparr>"
-  
-fun append_pre_exn :: "'lbl pre_exn \<Rightarrow> 'lbl pre_exn \<Rightarrow> 'lbl pre_exn" 
-  (infix "@@" 65) 
-where
-  "\<lparr> events = E1, lbl = a1, dvid = dvid1, cuid = cuid1, peid = peid1, sb = sb1 \<rparr> @@ 
-  \<lparr> events = E2, lbl = a2, dvid = dvid2, cuid = cuid2, peid = peid2, sb = sb2 \<rparr> =
-  \<lparr> events = E1 \<union> E2, lbl = (a1,E1) \<oplus> (a2,E2), 
-  dvid = (dvid1,E1) \<oplus> (dvid2,E2), cuid = (cuid1,E1) \<oplus> (cuid2,E2), 
-  peid = (peid1,E1) \<oplus> (peid2,E2), sb = sb1 \<union> (E1 \<times> E2) \<union> sb2 \<rparr>"
-  
-fun par_pre_exn :: "'lbl pre_exn \<Rightarrow> 'lbl pre_exn \<Rightarrow> 'lbl pre_exn" 
-  (infix "\<parallel>" 65) 
-where
-  "\<lparr> events = E1, lbl = a1, dvid = dvid1, cuid = cuid1, peid = peid1, sb = sb1 \<rparr>
-  \<parallel>
-  \<lparr> events = E2, lbl = a2, dvid = dvid2, cuid = cuid2, peid = peid2, sb = sb2 \<rparr> =
-  \<lparr> events = E1 \<union> E2, lbl = (a1,E1) \<oplus> (a2,E2), 
-  dvid = (dvid1,E1) \<oplus> (dvid2,E2), cuid = (cuid1,E1) \<oplus> (cuid2,E2), 
-  peid = (peid1,E1) \<oplus> (peid2,E2), sb = sb1 \<union> sb2 \<rparr>"
-  
-fun append_evt :: "eid \<Rightarrow> 'lbl \<Rightarrow> dvid \<Rightarrow> cuid \<Rightarrow> peid \<Rightarrow> 'lbl pre_exn \<Rightarrow> 
-  'lbl pre_exn"
-where
-  "append_evt e a dv cu pe X = 
-  X \<lparr> events := events X \<union> {e}, 
-  lbl := (lbl X) (e := a), 
-  dvid := (dvid X) (e := dv), 
-  cuid := (cuid X) (e := cu), 
-  peid := (peid X) (e := pe), 
-  sb := sb X \<union> {(e',e) | e'. dvid X e' = dv \<and> cuid X e' = cu \<and> peid X e' = pe } \<rparr>"
-
-record witness =
-  Rf :: "eid relation"
-  Mo :: "eid relation" 
-  
-fun update_L_rf where "update_L_rf f Xo = Xo \<lparr> Rf := f (Rf Xo) \<rparr>"
-fun update_L_mo where "update_L_mo f Xo = Xo \<lparr> Mo := f (Mo Xo) \<rparr>"  
-
-record 'lbl exn = 
-  Pre :: "'lbl pre_exn"
-  Wit :: "witness"
-  
-fun update_pre where "update_pre f X = X \<lparr> Pre := f (Pre X) \<rparr>"
-fun update_wit where "update_wit f X = X \<lparr> Wit := f (Wit X) \<rparr>"
-
-fun erase_witness :: "'lbl exn \<Rightarrow> 'lbl exn"
-where
-  "erase_witness X = X \<lparr> Wit := \<lparr> Rf = {}, Mo = {} \<rparr> \<rparr>"
-  
-definition nil_exn :: "_ exn"
-where [simp]:
-  "nil_exn = \<lparr> Pre = nil_pre_exn, Wit = \<lparr> Rf = {}, Mo = {} \<rparr> \<rparr>"
 
 end
